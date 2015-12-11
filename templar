@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+import sys, os, fnmatch
+from json import loads
+from optparse import OptionParser
+from urllib2 import urlopen, URLError, HTTPError
+
+from lib.botox import Botox
+from lib.templar import Templar
+
+def get_userdata():
+  URL="http://169.254.169.254/latest/user-data"
+  try:
+    output = urlopen(URL)
+    result = loads( output.read() )
+    return result
+  except HTTPError, err:
+    print "URL: %s\nHTTP Error Code: %s" % (url, err.code)
+    return None
+  except URLError, err:
+    print "URL: %s\nReason: %s" % (url, err.reason)
+    return None
+  except ValueError, err:
+    print err
+    return None
+
+def getTemplates(sourceDir):
+  templates = []
+  for root, dirnames, filenames in os.walk(sourceDir):
+    for filename in fnmatch.filter(filenames, "*.tmpl"):
+      templates.append(os.path.join(root, filename))
+  return templates
+
+def render(options, tmplObj):
+  if options.sourceDir:
+    allTemplates = getTemplates(options.sourceDir)
+    for template in allTemplates:
+      tmplObj.set_sourceDirectory( os.path.dirname(template) )
+      destination = template.rstrip("tmpl").rstrip(".")
+      tmplObj.dump_template( os.path.basename(template), destination)
+  elif options.template and options.destination:
+    options.template = os.path.abspath(options.template)
+    options.destination = os.path.abspath(options.destination)
+    sourceDirectory = os.path.dirname(options.template)
+    tmplObj.set_sourceDirectory( sourceDirectory )
+    tmplObj.dump_template( os.path.basename(options.template), options.destination )
+  elif options.string and options.destination:
+    options.destination = os.path.abspath(options.destination)
+    sourceDirectory = os.path.dirname(options.destination)
+    tmplObj.set_sourceDirectory( sourceDirectory )
+    tmplObj.dump_string(options.string, options.destination)
+  elif options.string and not options.destination:
+    print tmplObj.render_string(options.string)
+  elif options.template and not options.destination:
+    options.template = os.path.abspath(options.template)
+    sourceDirectory = os.path.dirname(options.template)
+    tmplObj.set_sourceDirectory( sourceDirectory )
+    print tmplObj.render_template( os.path.basename(options.template) )
+    
+
+if __name__ == "__main__":
+  notes = """
+    All default values come from the environment variables. \n
+    Any other values (from the cli or s3) gets appended to the environment variable only when the script runs."""
+  parser = OptionParser(notes)
+  parser.add_option("-e", "--environment", type="string", dest="environment", help="Specify environment variables")
+  parser.add_option("-t", "--template", type="string", dest="template", help="Location of your template file")
+  parser.add_option("-s", "--string", type="string", dest="string", help="Template string (make sure to wrap in quotes)")
+  parser.add_option("-d", "--destination", type="string", dest="destination", help="Path of where to dump the rendered template")
+  parser.add_option("-j", "--json", type="string", dest="jsonFile", help="Path to the json file with all the variables/values (default will try to get it from s3)")
+  parser.add_option("-v", "--values", type="string", dest="values", help="Values in json format e.g '{\"key\":\"value\"}' (default will try to get it from s3)")
+  parser.add_option("-b", "--bucket", type="string", dest="bucket", help="provide a s3 bucket (default will get from userdata/metadata)")
+  parser.add_option("-k", "--key", type="string", dest="key", help="provide a s3 bucket key (default will get from userdata/metadata)")
+  parser.add_option("--aws", action="store_true", dest="aws", help="get values from AWS S3")
+  parser.add_option("--secret", type="string", dest="secret", help="provide a aws secret key (default will get from userdata/metadata)")
+  parser.add_option("--access", type="string", dest="access", help="provide a aws access key  (default will get from userdata/metadata)")
+  parser.add_option("--src", type="string", dest="sourceDir", help="Source Directory to find all tmpl file to render and then dump it on the same location")
+  (options, args) = parser.parse_args()
+
+  if options.aws:
+    userdata = get_userdata()
+    env = userdata.get("environment", None)
+    access_key = options.access if options.access else userdata.get("access_key", None)
+    secret_key = options.secret if options.secret else userdata.get("secret_key", None)
+    bucket = options.bucket if options.bucket else userdata.get("bucket", None)
+    key = options.key if options.key else userdata.get("key", None)
+  else:
+    env = options.environment
+  # default is the what in the environment variable
+  values = dict(os.environ)
+  tmpl = Templar()
+
+  if options.values:
+    values.update( loads(options.values) )
+  elif options.jsonFile:
+    json_file = os.path.abspath(options.jsonFile)
+    fd = open(json_file, "r")
+    r = loads(fd.read())
+    fd.close()
+    values.update(r)
+  elif options.aws and access_key and secret_key and bucket:
+    aws = Botox(access_key, secret_key)
+    content = get_contents(bucket, key)
+    values.update( content )
+
+  if options.sourceDir or options.template or options.string or options.destination:
+    tmpl.set_values( values )
+    render(options, tmpl)
+  else:
+    parser.print_help()
+
